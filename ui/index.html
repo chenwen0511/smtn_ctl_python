@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>点灯自检</title>
+<style>
+  :root {
+    --bg: #10140f;
+    --panel: #1a2118;
+    --line: #2d3a28;
+    --text: #e7f0df;
+    --muted: #8ea086;
+    --ok: #3dd68c;
+    --bad: #ff5d5d;
+    --amber: #f0b429;
+    --red: #e23b3b;
+    --green: #1f9d55;
+    --blue: #2f6fed;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: flex-end;
+    padding: 20px 24px 8px;
+  }
+  h1 { margin: 0; font-size: 28px; letter-spacing: 0.04em; }
+  .sub { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
+  main { padding: 12px 24px 28px; display: grid; gap: 14px; }
+  .hw {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px 18px;
+  }
+  .hw-top { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+  .badge {
+    min-width: 112px;
+    text-align: center;
+    font-size: 22px;
+    font-weight: 700;
+    padding: 10px 16px;
+    border-radius: 10px;
+  }
+  .badge.ok { background: #143524; color: var(--ok); }
+  .badge.bad { background: #3a1616; color: var(--bad); }
+  .badge.wait { background: #2c2614; color: var(--amber); }
+  .grid {
+    margin-top: 14px;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px 16px;
+  }
+  .k { color: var(--muted); font-size: 12px; }
+  .v { margin-top: 3px; font-size: 16px; word-break: break-all; }
+  .ports { margin: 10px 0 0; color: var(--muted); font-size: 13px; }
+  .work {
+    display: grid;
+    grid-template-columns: 1.1fr 1fr 1fr;
+    gap: 14px;
+  }
+  section {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  section h2 { margin: 0; font-size: 18px; }
+  section p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+  label { display: block; font-size: 13px; color: var(--muted); }
+  input {
+    width: 100%;
+    margin-top: 6px;
+    height: 48px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: #0d120c;
+    color: var(--text);
+    font-size: 22px;
+    padding: 0 12px;
+    letter-spacing: 0.04em;
+  }
+  .row { display: flex; gap: 8px; }
+  button {
+    border: 0;
+    border-radius: 10px;
+    min-height: 52px;
+    padding: 0 12px;
+    font-size: 16px;
+    font-weight: 700;
+    color: white;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .grow { flex: 1; }
+  .primary { background: #d9822b; }
+  .ghost { background: #33402e; }
+  .cR { background: var(--red); flex: 1; }
+  .cG { background: var(--green); flex: 1; }
+  .cB { background: var(--blue); flex: 1; }
+  .stage {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .lamp {
+    width: 54px;
+    height: 54px;
+    border-radius: 50%;
+    border: 3px solid #2a3326;
+    background: #0c0f0b;
+  }
+  .lamp.on.R { background: var(--red); box-shadow: 0 0 18px var(--red); }
+  .lamp.on.G { background: var(--green); box-shadow: 0 0 18px var(--green); }
+  .lamp.on.B { background: var(--blue); box-shadow: 0 0 18px var(--blue); }
+  .now { font-size: 20px; font-weight: 700; }
+  .dwell { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+  .dwell input { width: 88px; height: 36px; font-size: 16px; margin: 0; }
+  #log {
+    margin: 0;
+    min-height: 120px;
+    max-height: 220px;
+    overflow: auto;
+    background: #0d120c;
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-family: ui-monospace, "Sarasa Mono SC", monospace;
+    font-size: 13px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+  }
+  @media (max-width: 980px) {
+    .grid, .work { grid-template-columns: 1fr; }
+    header { flex-direction: column; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>点灯自检</h1>
+    <p class="sub">红、绿、蓝依次点亮。屏幕上的颜色应和货架一致，对不上就是不正常。</p>
+  </div>
+  <div class="dwell">
+    <span>每色停留</span>
+    <input id="dwell" type="number" min="0.5" max="10" step="0.5" value="2">
+    <span>秒</span>
+  </div>
+</header>
+<main>
+  <div class="hw">
+    <div class="hw-top">
+      <div>
+        <div class="k">硬件 / 串口</div>
+        <div class="now" id="hw-title">正在读取…</div>
+      </div>
+      <div class="badge wait" id="hw-badge">检测中</div>
+    </div>
+    <div class="grid" id="hw-grid"></div>
+    <div class="ports" id="hw-ports"></div>
+  </div>
+
+  <div class="stage">
+    <div class="lamp" id="lampR"></div>
+    <div class="lamp" id="lampG"></div>
+    <div class="lamp" id="lampB"></div>
+    <div class="now" id="now">待机</div>
+  </div>
+
+  <div class="work">
+    <section>
+      <h2>整架全部点亮</h2>
+      <p>输入货架号。储位灯和灯塔一起，红、绿、蓝各亮一次。</p>
+      <label>货架号
+        <input id="board" inputmode="numeric" placeholder="352" autocomplete="off">
+      </label>
+      <div class="row">
+        <button class="primary grow" id="allSeq">RGB 全部点亮（含灯塔）</button>
+        <button class="ghost" id="allOff">全部熄灭</button>
+      </div>
+      <div class="row">
+        <button class="cR" data-scope="all" data-color="R">红</button>
+        <button class="cG" data-scope="all" data-color="G">绿</button>
+        <button class="cB" data-scope="all" data-color="B">蓝</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>单个编号</h2>
+      <p>7 位储位，或只填灯号（会拼到上面的货架号）。红、绿、蓝各亮一次。</p>
+      <label>编号
+        <input id="location" inputmode="numeric" placeholder="3520890 或 890" autocomplete="off">
+      </label>
+      <div class="row">
+        <button class="primary grow" id="oneSeq">RGB 点亮</button>
+        <button class="ghost" id="oneOff">熄灭</button>
+      </div>
+      <div class="row">
+        <button class="cR" data-scope="one" data-color="R">红</button>
+        <button class="cG" data-scope="one" data-color="G">绿</button>
+        <button class="cB" data-scope="one" data-color="B">蓝</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>只点灯塔</h2>
+      <p>用上面的货架号，只点灯塔。红、绿、蓝各亮一次。</p>
+      <label>当前货架号
+        <input id="boardEcho" disabled>
+      </label>
+      <div class="row">
+        <button class="primary grow" id="towerSeq">RGB 点亮灯塔</button>
+        <button class="ghost" id="towerOff">灯塔熄灭</button>
+      </div>
+      <div class="row">
+        <button class="cR" data-scope="tower" data-color="R">红</button>
+        <button class="cG" data-scope="tower" data-color="G">绿</button>
+        <button class="cB" data-scope="tower" data-color="B">蓝</button>
+      </div>
+    </section>
+  </div>
+
+  <section>
+    <h2>结果</h2>
+    <pre id="log">等待操作。</pre>
+  </section>
+</main>
+<script>
+const COLORS = [
+  { id: "R", name: "红色" },
+  { id: "G", name: "绿色" },
+  { id: "B", name: "蓝色" },
+];
+const boardEl = document.getElementById("board");
+const locationEl = document.getElementById("location");
+const dwellEl = document.getElementById("dwell");
+const echoEl = document.getElementById("boardEcho");
+const nowEl = document.getElementById("now");
+const logEl = document.getElementById("log");
+let busy = false;
+let lines = [];
+
+boardEl.value = localStorage.getItem("shelfBoard") || "352";
+locationEl.value = localStorage.getItem("shelfLocation") || "";
+dwellEl.value = localStorage.getItem("shelfDwell") || "2";
+syncEcho();
+boardEl.addEventListener("input", () => {
+  localStorage.setItem("shelfBoard", boardEl.value.trim());
+  syncEcho();
+});
+locationEl.addEventListener("input", () => localStorage.setItem("shelfLocation", locationEl.value.trim()));
+dwellEl.addEventListener("change", () => localStorage.setItem("shelfDwell", dwellEl.value));
+
+function syncEcho() {
+  echoEl.value = boardEl.value.trim();
+}
+
+function log(text) {
+  const stamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  lines.unshift(stamp + "  " + text);
+  lines = lines.slice(0, 30);
+  logEl.textContent = lines.join("\n");
+}
+
+function setColor(color, text) {
+  for (const item of COLORS) {
+    document.getElementById("lamp" + item.id).classList.toggle("on", item.id === color);
+  }
+  nowEl.textContent = text;
+}
+
+function dwellMs() {
+  const n = Number(dwellEl.value);
+  if (!Number.isFinite(n) || n < 0.5) return 2000;
+  return Math.round(n * 1000);
+}
+
+function parseBoard(text) {
+  const s = String(text || "").trim();
+  if (/^\d{7}$/.test(s)) return Number(s.slice(0, 3));
+  if (/^\d{1,3}$/.test(s)) return Number(s);
+  throw new Error("货架号请填主板号，例如 352");
+}
+
+function parseLocation(text, board) {
+  const s = String(text || "").trim();
+  if (/^\d{7}$/.test(s)) return s;
+  if (/^\d{1,4}$/.test(s)) {
+    return String(board).padStart(3, "0") + String(Number(s)).padStart(4, "0");
+  }
+  throw new Error("编号请填 7 位储位（3520890）或灯号（890）");
+}
+
+async function post(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let data = {};
+  try { data = await res.json(); } catch (err) { data = {}; }
+  if (!res.ok || data.code !== 0) {
+    throw new Error(data.msg || ("请求失败 " + res.status));
+  }
+  return data;
+}
+
+async function lightAll(board, color) {
+  await post("/api/board/on", { board, color });
+  await post("/api/tower", { board, color, action: "on" });
+}
+
+async function lightOne(location, color) {
+  await post("/api/light/on", { location, color });
+}
+
+async function lightTower(board, color) {
+  await post("/api/tower", { board, color, action: "on" });
+}
+
+async function offAll(board) {
+  for (const color of COLORS) {
+    await post("/api/board/off", { board, color: color.id });
+    await post("/api/tower", { board, color: color.id, action: "off" });
+  }
+}
+
+async function offOne(location) {
+  for (const color of COLORS) {
+    await post("/api/light/off", { location, color: color.id });
+  }
+}
+
+async function offTower(board) {
+  for (const color of COLORS) {
+    await post("/api/tower", { board, color: color.id, action: "off" });
+  }
+}
+
+function lock(on) {
+  busy = on;
+  document.querySelectorAll("button").forEach((btn) => { btn.disabled = on; });
+}
+
+async function runSeq(label, step) {
+  if (busy) return;
+  lock(true);
+  try {
+    for (const color of COLORS) {
+      setColor(color.id, label + " · " + color.name);
+      await step(color.id, color.name);
+      log(label + " " + color.name + " 已下发");
+      await new Promise((resolve) => setTimeout(resolve, dwellMs()));
+    }
+    setColor("B", label + " · 停在蓝色，请目视确认");
+    log(label + " 红绿蓝完成，当前停在蓝色");
+  } catch (err) {
+    setColor("", "失败");
+    log(label + " 失败：" + err.message);
+  } finally {
+    lock(false);
+  }
+}
+
+async function runOnce(label, color, step) {
+  if (busy) return;
+  lock(true);
+  const meta = COLORS.find((item) => item.id === color);
+  try {
+    setColor(color, meta ? (label + " · " + meta.name) : label);
+    await step(color, meta ? meta.name : "");
+    log(label + (meta ? " " + meta.name : "") + " 已下发");
+  } catch (err) {
+    setColor("", "失败");
+    log(label + " 失败：" + err.message);
+  } finally {
+    lock(false);
+  }
+}
+
+document.getElementById("allSeq").onclick = () => {
+  let board;
+  try { board = parseBoard(boardEl.value); }
+  catch (err) { log(err.message); return; }
+  runSeq("货架 " + board + " 整架+灯塔", (color) => lightAll(board, color));
+};
+document.getElementById("allOff").onclick = async () => {
+  let board;
+  try { board = parseBoard(boardEl.value); }
+  catch (err) { log(err.message); return; }
+  await runOnce("货架 " + board + " 整架+灯塔已熄灭", "", async () => {
+    await offAll(board);
+    setColor("", "已熄灭");
+  });
+};
+document.getElementById("oneSeq").onclick = () => {
+  let board, location;
+  try {
+    board = parseBoard(boardEl.value);
+    location = parseLocation(locationEl.value, board);
+  } catch (err) { log(err.message); return; }
+  locationEl.value = location;
+  runSeq("储位 " + location, (color) => lightOne(location, color));
+};
+document.getElementById("oneOff").onclick = async () => {
+  let board, location;
+  try {
+    board = parseBoard(boardEl.value);
+    location = parseLocation(locationEl.value, board);
+  } catch (err) { log(err.message); return; }
+  await runOnce("储位 " + location + " 已熄灭", "", async () => {
+    await offOne(location);
+    setColor("", "已熄灭 " + location);
+  });
+};
+document.getElementById("towerSeq").onclick = () => {
+  let board;
+  try { board = parseBoard(boardEl.value); }
+  catch (err) { log(err.message); return; }
+  runSeq("货架 " + board + " 灯塔", (color) => lightTower(board, color));
+};
+document.getElementById("towerOff").onclick = async () => {
+  let board;
+  try { board = parseBoard(boardEl.value); }
+  catch (err) { log(err.message); return; }
+  await runOnce("货架 " + board + " 灯塔已熄灭", "", async () => {
+    await offTower(board);
+    setColor("", "灯塔已熄灭");
+  });
+};
+document.querySelectorAll("button[data-scope]").forEach((btn) => {
+  btn.onclick = () => {
+    const scope = btn.dataset.scope;
+    const color = btn.dataset.color;
+    try {
+      const board = parseBoard(boardEl.value);
+      if (scope === "all") {
+        runOnce("货架 " + board + " 整架+灯塔", color, () => lightAll(board, color));
+      } else if (scope === "tower") {
+        runOnce("货架 " + board + " 灯塔", color, () => lightTower(board, color));
+      } else {
+        const location = parseLocation(locationEl.value, board);
+        locationEl.value = location;
+        runOnce("储位 " + location, color, () => lightOne(location, color));
+      }
+    } catch (err) {
+      log(err.message);
+    }
+  };
+});
+
+function cell(k, v) {
+  return "<div><div class='k'>" + k + "</div><div class='v'>" + (v || "—") + "</div></div>";
+}
+
+let hwState = "";
+
+async function loadHardware() {
+  const badge = document.getElementById("hw-badge");
+  const title = document.getElementById("hw-title");
+  const grid = document.getElementById("hw-grid");
+  const ports = document.getElementById("hw-ports");
+  try {
+    const res = await fetch("/api/hardware");
+    const body = await res.json();
+    const data = body.data || {};
+    const active = data.active || {};
+    const ok = body.code === 0 && data.serial_open;
+    const state = ok ? "ok" : ("bad:" + (body.msg || ""));
+    if (state !== hwState) {
+      hwState = state;
+      if (!ok) log("硬件异常：" + (body.msg || "串口未打开"));
+    }
+    badge.className = "badge " + (ok ? "ok" : "bad");
+    badge.textContent = ok ? "串口正常" : "串口异常";
+    const serialNo = active.serial || "";
+    title.textContent = serialNo ? ("串口序列号 " + serialNo) : (active.tty || "未找到点灯串口");
+    const who = [active.manufacturer, active.product].filter(Boolean).join(" ");
+    grid.innerHTML = [
+      cell("串口号", active.tty),
+      cell("固定路径", active.path),
+      cell("USB 序列号", serialNo),
+      cell("厂商 / 型号", who),
+      cell("VID:PID", active.vid && active.pid ? (active.vid + ":" + active.pid) : ""),
+      cell("波特率", data.baud ? (data.baud + "  " + (data.parity || "")) : ""),
+      cell("设备节点", data.serial_exists ? "存在" : "不存在"),
+      cell("串口打开", data.serial_open ? "已打开" : "未打开"),
+    ].join("");
+    const others = (data.ports || []).map((port) => {
+      const mark = port.tty === active.tty ? "点灯口" : "其他";
+      return mark + "  " + port.tty + "  " + (port.serial || port.path);
+    });
+    ports.textContent = others.join("    ");
+  } catch (err) {
+    badge.className = "badge bad";
+    badge.textContent = "页面异常";
+    title.textContent = err.message;
+  }
+}
+
+loadHardware();
+setInterval(loadHardware, 4000);
+</script>
+</body>
+</html>

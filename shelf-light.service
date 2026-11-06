@@ -1,0 +1,20 @@
+[Unit]
+Description=货架灯 HTTP 接口服务 (ctl_python)
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=stephen
+SupplementaryGroups=dialout
+WorkingDirectory=/home/stephen/smtn_ptl/ctl_python
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/bin/mkdir -p /home/stephen/smtn_ptl/ctl_python/log
+ExecStart=/home/stephen/smtn_ptl/ctl_python/.venv/bin/python /home/stephen/smtn_ptl/ctl_python/shelf_api.py -p /dev/serial/by-id/usb-1a86_USB2.0-Ser_-if00-port0 -b 38400 --host 0.0.0.0 --http-port 8000
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/stephen/smtn_ptl/ctl_python/log/shelf_api.log
+StandardError=append:/home/stephen/smtn_ptl/ctl_python/log/shelf_api.log
+
+[Install]
+WantedBy=multi-user.target
