@@ -31,9 +31,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import RotatingFileHandler
 
 from shelf_light import (
     DEFAULT_BAUD,
@@ -47,11 +50,85 @@ from shelf_light import (
 )
 
 VALID_COLORS = ("R", "G", "B")
+COLOR_NAME = {"R": "红", "G": "绿", "B": "蓝"}
+_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log")
+_BIZ_LOG = os.path.join(_LOG_DIR, "shelf_light.log")
 
 # 全局串口连接 + 锁（串口是独占资源，所有请求串行发送）
 _port_lock = threading.Lock()
 _shelf: ShelfPort | None = None
 _serial_cfg = {"port": DEFAULT_PORT, "baud": DEFAULT_BAUD}
+_biz = logging.getLogger("shelf.light")
+_health_lock = threading.Lock()
+_health_state: str | None = None
+
+
+class _BizFormatter(logging.Formatter):
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        ct = self.converter(record.created)
+        return "%s.%03d" % (time.strftime("%Y-%m-%d %H:%M:%S", ct), record.msecs)
+
+
+def _setup_biz_log() -> str:
+    """业务日志单独落盘，不跟访问日志混在一起。"""
+    os.makedirs(_LOG_DIR, exist_ok=True)
+    _biz.setLevel(logging.INFO)
+    _biz.propagate = False
+    if not _biz.handlers:
+        handler = RotatingFileHandler(
+            _BIZ_LOG, maxBytes=5 * 1024 * 1024, backupCount=10, encoding="utf-8"
+        )
+        handler.setFormatter(_BizFormatter("%(asctime)s %(levelname)s %(message)s"))
+        _biz.addHandler(handler)
+    return _BIZ_LOG
+
+
+def _color_label(body: dict) -> str:
+    raw = body.get("color", "R")
+    color = str(raw).strip().upper() if raw is not None else ""
+    if not color:
+        color = "R"
+    name = COLOR_NAME.get(color)
+    return "%s(%s)" % (name, color) if name else color
+
+
+def _location_bits(text: str) -> str:
+    loc = str(text).strip()
+    if not loc:
+        return "盘=(空)"
+    try:
+        board, led = parse_location(loc)
+    except ValueError:
+        return "盘=%s" % loc
+    if led < 1:
+        return "盘=%s 货架=%s" % (loc, board)
+    return "盘=%s 货架=%d 灯号=%04d" % (loc, board, led)
+
+
+def _describe(path: str, body: dict) -> str:
+    """把请求整理成可落盘的业务描述。解析失败也尽量记下调用方传来的盘号。"""
+    color = _color_label(body)
+    if path in ("/api/light/on", "/api/light/off"):
+        action = "单灯点亮" if path.endswith("/on") else "单灯熄灭"
+        return "动作=%s 颜色=%s %s" % (action, color, _location_bits(body.get("location", "")))
+    if path in ("/api/light/multi-on", "/api/light/multi-off"):
+        action = "批量点亮" if path.endswith("/on") else "批量熄灭"
+        locs = body.get("locations")
+        if isinstance(locs, list):
+            shown = ",".join(str(item).strip() for item in locs) or "(空)"
+            count = len(locs)
+        else:
+            shown = str(locs)
+            count = 0
+        return "动作=%s 颜色=%s 数量=%d 盘=%s" % (action, color, count, shown)
+    if path in ("/api/board/on", "/api/board/off"):
+        action = "整架点亮" if path.endswith("/on") else "整架熄灭"
+        return "动作=%s 颜色=%s 货架=%s 范围=整架" % (action, color, body.get("board", ""))
+    if path == "/api/tower":
+        action = str(body.get("action", "on")).strip().lower() or "on"
+        action_name = {"on": "灯塔点亮", "off": "灯塔熄灭", "flash": "灯塔闪烁"}.get(action, "灯塔%s" % action)
+        return "动作=%s 颜色=%s 货架=%s 范围=灯塔" % (action_name, color, body.get("board", ""))
+    return "动作=未知 路径=%s" % path
 
 
 def _get_port() -> ShelfPort:
@@ -227,21 +304,62 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def log_message(self, fmt, *args):  # 简化日志
-        print("[%s] %s" % (self.log_date_time_string(), fmt % args))
+    def _client_ip(self) -> str:
+        forwarded = self.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return self.client_address[0]
+
+    def _audit(self, ok: bool, action: str, reason: str = "", sent: bool = True, count: int = 0) -> None:
+        if ok and not sent:
+            result = "结果=成功 下发=未发串口"
+        elif ok:
+            result = "结果=成功 下发=已发串口 帧数=%d" % count
+        else:
+            result = "结果=失败 原因=%s" % reason
+        line = "来源=%s %s %s" % (self._client_ip(), action, result)
+        self._detail = line
+        if ok:
+            _biz.info(line)
+        else:
+            _biz.warning(line)
+
+    def log_message(self, fmt, *args):
+        base = "[%s] %s" % (self.log_date_time_string(), fmt % args)
+        detail = getattr(self, "_detail", "")
+        print("%s | %s" % (base, detail) if detail else base, flush=True)
 
     def do_GET(self):
-        if self.path.rstrip("/") == "/api/health":
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path == "/api/health":
             ok, msg, data = _probe_serial()
             data["routes"] = sorted(ROUTES)
+            self._note_health(ok, msg, data)
             self._reply(0 if ok else 1, msg, data, http=200 if ok else 503)
         else:
+            self._audit(False, "动作=未知接口 路径=%s" % self.path, reason="未知接口")
             self._reply(404, "未知接口: %s" % self.path, http=404)
 
+    def _note_health(self, ok: bool, msg: str, data: dict) -> None:
+        global _health_state
+        state = "ok" if ok else "fail:%s" % msg
+        with _health_lock:
+            if state == _health_state:
+                return
+            _health_state = state
+        serial = data.get("serial") if isinstance(data.get("serial"), dict) else {}
+        port = serial.get("port", _serial_cfg["port"])
+        baud = serial.get("baud", _serial_cfg["baud"])
+        if ok:
+            _biz.info("来源=%s 动作=串口检查 串口=%s 波特率=%s 结果=正常" % (self._client_ip(), port, baud))
+        else:
+            _biz.warning("来源=%s 动作=串口检查 串口=%s 波特率=%s 结果=异常 原因=%s" % (self._client_ip(), port, baud, msg))
+
     def do_POST(self):
-        path = self.path.rstrip("/")
+        path = self.path.split("?", 1)[0].rstrip("/")
         handler = ROUTES.get(path)
         if handler is None:
+            self._audit(False, "动作=未知接口 路径=%s" % path, reason="未知接口")
             self._reply(404, "未知接口: %s" % path, http=404)
             return
         try:
@@ -250,20 +368,25 @@ class ApiHandler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ValueError("请求体必须是 JSON 对象")
         except (ValueError, json.JSONDecodeError) as exc:
+            self._audit(False, "动作=请求无效 路径=%s" % path, reason="JSON 解析失败: %s" % exc)
             self._reply(400, "JSON 解析失败: %s" % exc, http=400)
             return
 
+        action = _describe(path, body)
         try:
             frames = handler(body)
             dry_run = bool(body.get("dry_run", False))
             hex_frames = _send_frames(frames, dry_run)
+            self._audit(True, action, sent=not dry_run, count=len(hex_frames))
             self._reply(0, "ok" if not dry_run else "ok (dry-run 未发串口)", {
                 "frames": hex_frames,
                 "count": len(hex_frames),
             })
         except ValueError as exc:
+            self._audit(False, action, reason=str(exc))
             self._reply(400, str(exc), http=400)
         except Exception as exc:  # 串口错误等
+            self._audit(False, action, reason="发送失败: %s" % exc)
             self._reply(500, "发送失败: %s" % exc, http=500)
 
 
@@ -277,11 +400,17 @@ def main(argv: list[str] | None = None) -> int:
 
     _serial_cfg["port"] = args.port
     _serial_cfg["baud"] = args.baud
+    biz_log = _setup_biz_log()
 
     server = ThreadingHTTPServer((args.host, args.http_port), ApiHandler)
     print("货架灯接口服务已启动: http://%s:%d" % (args.host, args.http_port))
     print("串口: %s @ %d（首次请求时打开）" % (args.port, args.baud))
     print("健康检查: curl http://127.0.0.1:%d/api/health" % args.http_port)
+    print("业务日志: %s" % biz_log)
+    _biz.info(
+        "动作=服务启动 监听=%s:%d 串口=%s 波特率=%d 业务日志=%s"
+        % (args.host, args.http_port, args.port, args.baud, biz_log)
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

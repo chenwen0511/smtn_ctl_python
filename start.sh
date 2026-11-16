@@ -2,7 +2,7 @@
 # 货架灯 HTTP 服务：创建虚拟环境，并启停 shelf_api.py
 #
 # 用法:
-#   ./start.sh start        # 串口 FT232 by-id，HTTP 8000
+#   ./start.sh start        # 串口 FT232 by-id，HTTP 8000；自检页 8090
 #   ./start.sh stop
 #   ./start.sh restart
 #   ./start.sh status
@@ -24,17 +24,22 @@ SERIAL_PORT="/dev/serial/by-id/usb-FTDI_USB_Serial_Converter_FTB6SPL3-if00-port0
 SERIAL_BAUD="38400"
 HTTP_HOST="0.0.0.0"
 HTTP_PORT="8000"
+UI_PORT="8090"
+UI_PID_FILE="$LOG_DIR/.shelf_ui.pid"
+UI_LOG_FILE="$LOG_DIR/shelf_ui.log"
 UNIT_NAME="shelf-light.service"
 UNIT_PATH="/etc/systemd/system/${UNIT_NAME}"
+UI_UNIT_NAME="shelf-light-ui.service"
+UI_UNIT_PATH="/etc/systemd/system/${UI_UNIT_NAME}"
 
 usage() {
   cat <<EOF
 用法: $(basename "$0") {setup|start|stop|restart|status|enable-boot|disable-boot}
 
-默认参数: -p /dev/serial/by-id/usb-FTDI_USB_Serial_Converter_FTB6SPL3-if00-port0 --http-port 8000
+默认参数: 点灯接口 --http-port 8000，自检页面 --port 8090
 
 命令:
-  start         确保环境后启动（已 enable-boot 则走 systemd）
+  start         确保环境后启动点灯接口和自检页面
   stop          停止服务
   restart       重启
   status        查看运行状态
@@ -147,21 +152,142 @@ WantedBy=multi-user.target
 EOF
 }
 
+write_ui_unit() {
+  local user
+  user="$(id -un)"
+  cat <<EOF
+[Unit]
+Description=货架灯点灯自检页面 (ctl_python)
+After=network.target ${UNIT_NAME}
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=${user}
+WorkingDirectory=${ROOT}
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/bin/mkdir -p ${LOG_DIR}
+ExecStart=${VENV}/bin/python ${ROOT}/ui/server.py --host ${HTTP_HOST} --port ${UI_PORT} --api http://127.0.0.1:${HTTP_PORT}
+Restart=always
+RestartSec=5
+StandardOutput=append:${UI_LOG_FILE}
+StandardError=append:${UI_LOG_FILE}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+ui_systemd_active() {
+  systemctl is-active --quiet "$UI_UNIT_NAME" 2>/dev/null
+}
+
+ui_systemd_enabled() {
+  systemctl is-enabled --quiet "$UI_UNIT_NAME" 2>/dev/null
+}
+
+ui_pid_running() {
+  if [[ -f "$UI_PID_FILE" ]]; then
+    local pid
+    pid="$(cat "$UI_PID_FILE")"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+    rm -f "$UI_PID_FILE"
+  fi
+  return 1
+}
+
+stop_ui_pidfile() {
+  if [[ ! -f "$UI_PID_FILE" ]]; then
+    return 0
+  fi
+  local pid
+  pid="$(cat "$UI_PID_FILE")"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    echo "停止自检页面 pid=$pid"
+    kill "$pid" 2>/dev/null || true
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        break
+      fi
+      sleep 0.2
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$UI_PID_FILE"
+}
+
+start_ui() {
+  mkdir -p "$LOG_DIR"
+  if ui_systemd_enabled || ui_systemd_active; then
+    sudo systemctl start "$UI_UNIT_NAME"
+    echo "已通过 systemd 启动 $UI_UNIT_NAME"
+    echo "  自检  http://${HTTP_HOST}:${UI_PORT}"
+    return 0
+  fi
+  if ui_pid_running; then
+    echo "自检页面已在运行 (pid $(cat "$UI_PID_FILE"))"
+    return 0
+  fi
+  cd "$ROOT"
+  echo "启动点灯自检页面..."
+  PYTHONUNBUFFERED=1 nohup "$VENV/bin/python" "$ROOT/ui/server.py" \
+    --host "$HTTP_HOST" \
+    --port "$UI_PORT" \
+    --api "http://127.0.0.1:${HTTP_PORT}" \
+    >> "$UI_LOG_FILE" 2>&1 &
+  echo $! > "$UI_PID_FILE"
+  sleep 0.3
+  if ! ui_pid_running; then
+    echo "自检页面启动失败，查看日志: $UI_LOG_FILE" >&2
+    tail -n 20 "$UI_LOG_FILE" >&2 || true
+    rm -f "$UI_PID_FILE"
+    return 1
+  fi
+  echo "自检页面已启动 pid=$(cat "$UI_PID_FILE")"
+  echo "  自检  http://${HTTP_HOST}:${UI_PORT}"
+  echo "  日志  $UI_LOG_FILE"
+}
+
+stop_ui() {
+  if ui_systemd_enabled || ui_systemd_active; then
+    sudo systemctl stop "$UI_UNIT_NAME"
+    echo "已通过 systemd 停止 $UI_UNIT_NAME"
+    stop_ui_pidfile
+    return 0
+  fi
+  if ! ui_pid_running; then
+    echo "自检页面未运行"
+    return 0
+  fi
+  stop_ui_pidfile
+  echo "自检页面已停止"
+}
+
 enable_boot() {
   ensure_env
   mkdir -p "$LOG_DIR"
   echo "安装 systemd 单元 $UNIT_NAME ..."
   write_unit | sudo tee "$UNIT_PATH" >/dev/null
+  write_ui_unit | sudo tee "$UI_UNIT_PATH" >/dev/null
   sudo systemctl daemon-reload
   stop_pidfile
+  stop_ui_pidfile
   sudo systemctl enable --now "$UNIT_NAME"
+  sudo systemctl enable --now "$UI_UNIT_NAME"
   echo "已设置开机自启，并立即启动"
   systemctl --no-pager --full status "$UNIT_NAME" || true
+  systemctl --no-pager --full status "$UI_UNIT_NAME" || true
 }
 
 disable_boot() {
   if [[ -f "$UNIT_PATH" ]] || systemd_enabled || systemd_active; then
     sudo systemctl disable --now "$UNIT_NAME" 2>/dev/null || true
+    sudo systemctl disable --now "$UI_UNIT_NAME" 2>/dev/null || true
     echo "已取消开机自启并停止 systemd 服务"
   else
     echo "未安装 systemd 开机自启"
@@ -173,6 +299,7 @@ start() {
   if systemd_enabled || systemd_active; then
     sudo systemctl start "$UNIT_NAME"
     echo "已通过 systemd 启动 $UNIT_NAME"
+    start_ui
     return 0
   fi
   if is_running; then
@@ -202,9 +329,11 @@ start() {
   echo "  串口  ${SERIAL_PORT} @ ${SERIAL_BAUD}"
   echo "  健康  curl http://127.0.0.1:${HTTP_PORT}/api/health"
   echo "  日志  $LOG_FILE"
+  start_ui
 }
 
 stop() {
+  stop_ui
   if systemd_enabled || systemd_active; then
     sudo systemctl stop "$UNIT_NAME"
     echo "已通过 systemd 停止 $UNIT_NAME"
@@ -220,17 +349,26 @@ stop() {
 }
 
 status() {
+  local ok=0
   if systemd_enabled || systemd_active; then
-    systemctl --no-pager --full status "$UNIT_NAME" || true
-    return 0
-  fi
-  if is_running; then
-    echo "运行中 pid=$(cat "$PID_FILE")"
+    systemctl --no-pager --full status "$UNIT_NAME" || ok=1
+  elif is_running; then
+    echo "点灯接口运行中 pid=$(cat "$PID_FILE")"
     echo "  日志 $LOG_FILE"
-    return 0
+  else
+    echo "点灯接口未运行"
+    ok=1
   fi
-  echo "未运行"
-  return 1
+  if ui_systemd_enabled || ui_systemd_active; then
+    systemctl --no-pager --full status "$UI_UNIT_NAME" || ok=1
+  elif ui_pid_running; then
+    echo "自检页面运行中 pid=$(cat "$UI_PID_FILE")"
+    echo "  日志 $UI_LOG_FILE"
+  else
+    echo "自检页面未运行"
+    ok=1
+  fi
+  return "$ok"
 }
 
 cmd="${1:-start}"

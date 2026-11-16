@@ -176,7 +176,10 @@ class Handler(BaseHTTPRequestHandler):
             UPSTREAM.rstrip("/") + path,
             data=raw,
             method="POST",
-            headers={"Content-Type": self.headers.get("Content-Type") or "application/json"},
+            headers={
+                "Content-Type": self.headers.get("Content-Type") or "application/json",
+                "X-Forwarded-For": self.client_address[0],
+            },
         )
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:

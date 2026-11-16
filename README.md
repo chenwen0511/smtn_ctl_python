@@ -83,13 +83,51 @@ B:  AA 54 01 60 00 00 02 01 88
 树莓派上：
 
 ```bash
-./start.sh start         # 默认 CH340 by-id，HTTP :8000
+./start.sh start         # 点灯接口 :8000，自检页面 :8090
 ./start.sh stop
 ./start.sh status
-./start.sh enable-boot   # systemd 开机自启
+./start.sh enable-boot   # 两个服务都设为开机自启，见下文
 ```
 
 完整接口说明见 [接口文档.md](接口文档.md)。
+
+## 开机自启
+
+在 `ctl_python` 目录执行。会安装 systemd 单元并立刻启动，之后开机自动拉起。
+
+```bash
+./start.sh enable-boot
+```
+
+这条命令同时设置两个服务：
+
+- `shelf-light.service`：点灯 HTTP 接口，`http://0.0.0.0:8000`，串口为 FT232 的 by-id 路径
+- `shelf-light-ui.service`：点灯自检页面，`http://0.0.0.0:8090`
+
+查看是否已自启、是否在跑：
+
+```bash
+./start.sh status
+systemctl is-enabled shelf-light.service shelf-light-ui.service
+systemctl is-active shelf-light.service shelf-light-ui.service
+```
+
+取消开机自启并停止：
+
+```bash
+./start.sh disable-boot
+```
+
+只改点灯自检页面时，用 systemd 本身的命令：
+
+```bash
+sudo systemctl enable --now shelf-light-ui.service    # 开机自启并立即启动
+sudo systemctl status shelf-light-ui.service
+sudo systemctl restart shelf-light-ui.service
+sudo systemctl disable --now shelf-light-ui.service   # 取消开机自启并停止
+```
+
+自检页面日志在 `log/shelf_ui.log`，点灯接口日志在 `log/shelf_api.log`。进程异常退出会隔 5 秒自动重启。
 
 只看报文、不发串口：
 
