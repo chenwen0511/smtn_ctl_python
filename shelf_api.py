@@ -95,38 +95,57 @@ def _color_label(body: dict) -> str:
 def _location_bits(text: str) -> str:
     loc = str(text).strip()
     if not loc:
-        return "盘=(空)"
+        return "编号=(空)"
     try:
         board, led = parse_location(loc)
     except ValueError:
-        return "盘=%s" % loc
+        return "编号=%s" % loc
     if led < 1:
-        return "盘=%s 货架=%s" % (loc, board)
-    return "盘=%s 货架=%d 灯号=%04d" % (loc, board, led)
+        return "编号=%s 货架=%s" % (loc, board)
+    return "编号=%s 货架=%d 灯号=%04d" % (loc, board, led)
+
+
+def _locations_bits(locs) -> tuple[int, str]:
+    if not isinstance(locs, list):
+        return 0, "编号=%s" % locs
+    if not locs:
+        return 0, "编号=(空)"
+    parts = []
+    for item in locs:
+        loc = str(item).strip()
+        try:
+            board, led = parse_location(loc)
+            if led < 1:
+                parts.append("%s(货架=%s)" % (loc, board))
+            else:
+                parts.append("%s(货架=%d,灯号=%04d)" % (loc, board, led))
+        except ValueError:
+            parts.append(loc or "(空)")
+    return len(locs), "编号=%s" % ",".join(parts)
 
 
 def _describe(path: str, body: dict) -> str:
-    """把请求整理成可落盘的业务描述。解析失败也尽量记下调用方传来的盘号。"""
+    """按确切路径写业务描述，避免 multi-on / multi-off 文案搞反。"""
     color = _color_label(body)
-    if path in ("/api/light/on", "/api/light/off"):
-        action = "单灯点亮" if path.endswith("/on") else "单灯熄灭"
-        return "动作=%s 颜色=%s %s" % (action, color, _location_bits(body.get("location", "")))
-    if path in ("/api/light/multi-on", "/api/light/multi-off"):
-        action = "批量点亮" if path.endswith("/on") else "批量熄灭"
-        locs = body.get("locations")
-        if isinstance(locs, list):
-            shown = ",".join(str(item).strip() for item in locs) or "(空)"
-            count = len(locs)
-        else:
-            shown = str(locs)
-            count = 0
-        return "动作=%s 颜色=%s 数量=%d 盘=%s" % (action, color, count, shown)
-    if path in ("/api/board/on", "/api/board/off"):
-        action = "整架点亮" if path.endswith("/on") else "整架熄灭"
-        return "动作=%s 颜色=%s 货架=%s 范围=整架" % (action, color, body.get("board", ""))
+    if path == "/api/light/on":
+        return "动作=单灯点亮 颜色=%s %s" % (color, _location_bits(body.get("location", "")))
+    if path == "/api/light/off":
+        return "动作=单灯熄灭 颜色=%s %s" % (color, _location_bits(body.get("location", "")))
+    if path == "/api/light/multi-on":
+        count, shown = _locations_bits(body.get("locations"))
+        return "动作=批量点亮 颜色=%s 数量=%d %s" % (color, count, shown)
+    if path == "/api/light/multi-off":
+        count, shown = _locations_bits(body.get("locations"))
+        return "动作=批量熄灭 颜色=%s 数量=%d %s" % (color, count, shown)
+    if path == "/api/board/on":
+        return "动作=整架点亮 颜色=%s 货架=%s 范围=整架" % (color, body.get("board", ""))
+    if path == "/api/board/off":
+        return "动作=整架熄灭 颜色=%s 货架=%s 范围=整架" % (color, body.get("board", ""))
     if path == "/api/tower":
         action = str(body.get("action", "on")).strip().lower() or "on"
-        action_name = {"on": "灯塔点亮", "off": "灯塔熄灭", "flash": "灯塔闪烁"}.get(action, "灯塔%s" % action)
+        action_name = {"on": "灯塔点亮", "off": "灯塔熄灭", "flash": "灯塔闪烁"}.get(
+            action, "灯塔%s" % action
+        )
         return "动作=%s 颜色=%s 货架=%s 范围=灯塔" % (action_name, color, body.get("board", ""))
     return "动作=未知 路径=%s" % path
 
